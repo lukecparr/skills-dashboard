@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Skills</title>
+<style>
+  :root { color-scheme: dark; --bg: #111317; --panel: #191c22; --line: #2a2e37; --dim: #8b93a3; --text: #e6e8ec; --accent: #7aa2f7; --pi: #c3a6ff; --claude: #e0a46f; --new: #9ece6a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  header h1 { font-size: 15px; margin: 0; }
+  header .summary { color: var(--dim); flex: 1; }
+  input, select, button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  main { display: grid; grid-template-columns: minmax(520px, 1fr) minmax(420px, 1fr); height: calc(100vh - 49px); }
+  #list, #detail { overflow: auto; padding: 8px 16px 40px; }
+  #detail { border-left: 1px solid var(--line); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 20px 0 6px; }
+  h3 { font-size: 13px; margin: 14px 0 4px; }
+  h3 .meta, .dim { color: var(--dim); font-weight: normal; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--dim); font-weight: normal; font-size: 12px; padding: 2px 6px; }
+  td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  tr.skill { cursor: pointer; }
+  tr.skill:hover, tr.skill.selected { background: var(--panel); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .when { white-space: nowrap; }
+  th.num { text-align: right; }
+  .zero { color: #4b5160; }
+  .badge { font-size: 11px; padding: 0 5px; border-radius: 3px; border: 1px solid; margin-right: 3px; }
+  .badge.pi { color: var(--pi); }
+  .badge.claude { color: var(--claude); }
+  .new { color: var(--new); }
+  .desc { color: var(--dim); font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+  .bars { display: flex; gap: 3px; align-items: flex-end; height: 48px; margin: 6px 0 2px; }
+  .bars div { width: 18px; background: var(--accent); min-height: 1px; }
+  .files a, .loc { display: block; color: var(--accent); cursor: pointer; text-decoration: none; padding: 1px 0; }
+  .loc { color: var(--text); cursor: auto; font-family: ui-monospace, monospace; font-size: 12px; }
+  pre { background: var(--panel); border: 1px solid var(--line); padding: 10px; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, monospace; }
+  .empty { color: var(--dim); margin: 2px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Skills</h1>
+  <span class="summary" id="summary">Scanning…</span>
+  <input id="filter" placeholder="Filter by name or description" size="30">
+  <select id="sort">
+    <option value="last30">Most used, last 30 days</option>
+    <option value="total">Most used, all time</option>
+    <option value="modifiedAt">Recently changed</option>
+    <option value="name">Name</option>
+  </select>
+  <button id="refresh">Rescan</button>
+</header>
+<main>
+  <section id="list"></section>
+  <section id="detail"><p class="dim">Pick a skill to see its files and usage.</p></section>
+</main>
+<script>
+let data
+let selectedId
+const $ = (id) => document.getElementById(id)
+const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+const DAY = 86400000
+
+function ago(iso) {
+  if (!iso) return '—'
+  const days = Math.floor((Date.now() - Date.parse(iso)) / DAY)
+  if (days < 1) return 'today'
+  if (days < 60) return `${days}d ago`
+  return new Date(iso).toLocaleDateString()
+}
+
+async function load() {
+  $('summary').textContent = 'Scanning…'
+  data = await (await fetch('/api/data')).json()
+  const projectCount = data.repos.reduce((n, repo) => n + repo.skills.length, 0) + data.learned.reduce((n, p) => n + p.skills.length, 0)
+  $('summary').textContent = `${data.global.length} global, ${projectCount} project skills. Usage from ${data.scan.transcripts} Pi and Claude Code transcripts (${data.scan.ms} ms). Scanned ${new Date(data.generatedAt).toLocaleTimeString()}.`
+  render()
+  if (selectedId) showDetail(selectedId)
+}
+
+function allSkills() {
+  return [...data.global, ...data.repos.flatMap((repo) => repo.skills), ...data.learned.flatMap((p) => p.skills)]
+}
+
+function render() {
+  const query = $('filter').value.toLowerCase()
+  const key = $('sort').value
+  const pick = (skills) => skills
+    .filter((s) => !query || s.name.toLowerCase().includes(query) || s.description.toLowerCase().includes(query))
+    .toSorted((a, b) => key === 'name' ? a.name.localeCompare(b.name)
+      : key === 'modifiedAt' ? b.modifiedAt.localeCompare(a.modifiedAt)
+      : b.usage[key] - a.usage[key] || a.name.localeCompare(b.name))
+
+  // While filtering, groups with no match are hidden.
+  const groups = (list) => list.map((group) => ({ ...group, shown: pick(group.skills) })).filter((group) => group.shown.length || !query)
+  const reposWithout = data.repos.filter((repo) => !repo.skills.length)
+  $('list').innerHTML = `
+    <h2>Global</h2>${table(pick(data.global), true)}
+    <h2>Repos you committed to in the last ${data.recentDays} days</h2>
+    ${groups(data.repos.filter((repo) => repo.skills.length)).map((repo) => `
+      <h3>${esc(repo.name)} <span class="meta">${esc(repo.branch)} · last commit ${ago(repo.lastCommitAt)} · ${repo.worktrees.length} worktree${repo.worktrees.length > 1 ? 's' : ''} · ${esc(repo.path)}</span></h3>
+      ${table(repo.shown)}`).join('')}
+    ${reposWithout.length && !query ? `<p class="empty">No skills in ${reposWithout.map((repo) => esc(repo.name)).join(', ')}.</p>` : ''}
+    <h2>Pi self-learned project skills</h2>
+    ${groups(data.learned).map((project) => `<h3>${esc(project.name)}</h3>${table(project.shown)}`).join('')}`
+
+  for (const row of document.querySelectorAll('tr.skill')) row.onclick = () => showDetail(row.dataset.id)
+}
+
+function table(skills, showSource) {
+  if (!skills.length) return '<p class="empty">None match.</p>'
+  return `<table>
+    <tr><th>Skill</th>${showSource ? '<th>Source</th>' : ''}<th class="num">30d</th><th class="num">All</th><th>Last used</th><th>Changed</th></tr>
+    ${skills.map((s) => `<tr class="skill ${s.id === selectedId ? 'selected' : ''}" data-id="${esc(s.id)}">
+      <td>${s.agents.map((a) => `<span class="badge ${a}">${a === 'pi' ? 'Pi' : 'Claude'}</span>`).join('')}<b>${esc(s.name)}</b><div class="desc">${esc(s.description)}</div></td>
+      ${showSource ? `<td class="dim">${esc(s.locations[0].source)}</td>` : ''}
+      <td class="num ${s.usage.last30 ? '' : 'zero'}">${s.usage.last30}</td>
+      <td class="num ${s.usage.total ? '' : 'zero'}">${s.usage.total}</td>
+      <td class="when">${ago(s.usage.lastUsedAt)}</td>
+      <td class="when ${Date.now() - Date.parse(s.modifiedAt) < 7 * DAY ? 'new' : ''}">${ago(s.modifiedAt)}</td>
+    </tr>`).join('')}
+  </table>`
+}
+
+function showDetail(id) {
+  const skill = allSkills().find((s) => s.id === id)
+  if (!skill) return
+  selectedId = id
+  for (const row of document.querySelectorAll('tr.skill')) row.classList.toggle('selected', row.dataset.id === id)
+  const u = skill.usage
+  const peak = Math.max(1, ...u.weeks)
+  $('detail').innerHTML = `
+    <h2>${esc(skill.name)}</h2>
+    <p>${esc(skill.description) || '<span class="dim">No description.</span>'}</p>
+    <h3>Locations</h3>
+    ${skill.locations.map((l) => `<span class="loc">${esc(l.path)} <span class="dim">(${esc(l.source)})</span></span>`).join('')}
+    <h3>Usage</h3>
+    <div>${u.last7} in 7 days · ${u.last30} in 30 days · ${u.total} all time · Pi ${u.pi}, Claude Code ${u.claude}</div>
+    <div class="bars" title="Uses per week, last 12 weeks">${u.weeks.map((n) => `<div style="height:${(n / peak) * 100}%" title="${n}"></div>`).join('')}</div>
+    <div class="dim">Last 12 weeks, oldest on the left</div>
+    ${u.recent.length ? `<table><tr><th>When</th><th>Agent</th><th>How</th><th>Where</th></tr>
+      ${u.recent.map((e) => `<tr><td class="when">${new Date(e.at).toLocaleString()}</td><td>${e.agent === 'pi' ? 'Pi' : 'Claude Code'}</td><td>${e.kind}</td><td class="dim">${esc(e.cwd?.replace(/^\/Users\/[^/]+/, '~'))}</td></tr>`).join('')}
+    </table>` : '<p class="empty">No recorded uses.</p>'}
+    <h3>Files <span class="meta">${esc(skill.realDir)}</span></h3>
+    <div class="files">${skill.files.toSorted((a, b) => (a.rel === 'SKILL.md' ? -1 : b.rel === 'SKILL.md' ? 1 : a.rel.localeCompare(b.rel)))
+      .map((f) => `<a data-path="${esc(skill.realDir + '/' + f.rel)}">${esc(f.rel)} <span class="dim">${(f.size / 1024).toFixed(1)} KB · changed ${ago(f.modifiedAt)}</span></a>`).join('')}</div>
+    <pre id="file" hidden></pre>`
+  for (const link of document.querySelectorAll('.files a')) link.onclick = () => showFile(link.dataset.path)
+  showFile(`${skill.realDir}/SKILL.md`)
+}
+
+async function showFile(file) {
+  const res = await fetch(`/api/file?path=${encodeURIComponent(file)}`)
+  $('file').hidden = false
+  $('file').textContent = `${file.split('/').slice(-2).join('/')}\n\n${await res.text()}`
+}
+
+$('filter').oninput = render
+$('sort').onchange = render
+$('refresh').onclick = load
+load()
+</script>
+</body>
+</html>
